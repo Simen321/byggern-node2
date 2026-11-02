@@ -56,7 +56,8 @@ int main()
     solenoid_init();
     motor_init();
     motor_set_position(10);
-    
+    uint8_t previousButton = 0;
+
     while (1)
     {
         //printf("Encoder count = %d\r\n", encoder_read());
@@ -64,26 +65,51 @@ int main()
 
         if (can_rx(&msg))
         {
-            uint8_t x = msg.byte[0];
-            uint8_t y = msg.byte[1];
-            uint8_t btn = msg.byte[2];
-            //servo_set_pulse_width(1500u);
+            switch (msg.id)
+            {
+            case 0x101: // joystick
+            printf("got joystick\r\n");
+                uint8_t x = msg.byte[0];
+                uint8_t y = msg.byte[1];
+                uint8_t btn = msg.byte[2];
+                //servo_set_pulse_width(1500u);
+                //servo_set_pulse_width((uint16_t)x*12);
 
-            //servo_set_pulse_width((uint16_t)x*12);
+                if (x > 140) {
+                motor_increase_position(1.5*(abs(x-128)));
+                }
+                if (x < 115) {
+                    motor_decrease_position(1.5*(abs(x-128)));
+                }
+                if (btn != previousButton) {
+                    solenoid_toggle();
+                    previousButton = btn;
+                } 
+                break;
+            case 0x102:
+            printf("got slider\r\n");
 
+                uint8_t slider_x = msg.byte[0];
+                uint8_t touchpad_x = msg.byte[1];
+                uint8_t touchpad_y = msg.byte[2];
+
+                break;
+
+            case 0x103:
+            printf("got buton\r\n");
+
+                uint8_t btn_r2 = msg.byte[0];
+                break;
             
-            if (x > 140) {
-            motor_increase_position(0.5*(abs(x-128)));
+            case 0x100:
+            printf("got solenoid\r\n");
 
-            }
-            if (x < 115) {
-                motor_decrease_position(0.5*(abs(x-128)));
-            }
-
-
-            if (btn == 1) {
                 solenoid_toggle();
-            } 
+
+            default:
+                break;
+            }
+
 
             //can_printmsg(msg);
             can_tx(msg);
