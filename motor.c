@@ -2,15 +2,23 @@
 #include <sam.h>
 
 
-#define k_p 1
+#define k_p 3
 #define k_i 0.1
 #define k_d 0
+#define anti_windup 20000
 
-#define maxPosition 2000
+int integral = 0;
+
+#define maxPosition 2200
 #define minPosition 0
 
 
+int previousWanted = 0;
+
 int wantedPosition = 0;
+uint8_t previousDirection = 1;
+int deadband_threshold = 20;
+
 
 typedef enum {
     POSITION,
@@ -45,16 +53,16 @@ void motor_init(void) {
 
 
 
-uint8_t previousDirection = 0;
 
 void motor_set_direction(uint8_t direction) {
     // disable if swapping direction
     if (direction != previousDirection){
         PWM->PWM_CH_NUM[0].PWM_CDTYUPD = 0;
-        int i = 25000;
+        volatile int i = 25000;
         while (i >= 0) {
             i--;
         }
+        previousDirection = direction;
     }
 
     if (direction == 0) {
@@ -70,21 +78,26 @@ void motor_set_speed(uint16_t speed) {
 
 
 
-// 0 is to the left, so towards the cable out side of the box
+// 0 is towards the cable side of the box.
 void motor_set_position(int position) {
-    if (((wantedPosition) < maxPosition) && ((wantedPosition) > minPosition)) {
+    if (((position) < maxPosition) && ((position) > minPosition)) {
         wantedPosition = position;
+        //previousWanted = wantedPosition;
     }
 }
 
 void motor_increase_position(uint8_t increment) {
     if (((wantedPosition+increment) < maxPosition) && ((wantedPosition+increment) > minPosition)) {
         wantedPosition += increment;
+        //previousWanted = wantedPosition;
+
     }
 }
 void motor_decrease_position(uint8_t increment) {
     if (((wantedPosition-increment) < maxPosition) && ((wantedPosition-increment) > minPosition)) {
         wantedPosition -= increment;
+        //previousWanted = wantedPosition;
+
     }
 }
 
@@ -92,17 +105,20 @@ void motor_run_position() {
     // calculate pid
     int currentPosition = encoder_read();
     int controlEffort = pid(currentPosition, wantedPosition);
-    uint8_t direction = 0;
+    //if (previousWanted != wantedPosition) {
+    //    integral = 0;
+    //}
+    if (abs(controlEffort) < deadband_threshold) {
+        motor_set_speed(0); 
+        return;
+    }
+    uint8_t direction = controlEffort < 0;
+    
 
     // handling of mins and maxes
-    uint16_t speed = min(controlEffort, 4000);
-    speed = max(0, controlEffort);
-    printf("Motor wanted: %d, motor current: %d, motor speed: %d", wantedPosition, currentPosition, speed);
-    if (wantedPosition > 0) {
-        direction = 0;
-    } else {
-        direction = 1;
-    }
+    uint16_t speed = min(abs(controlEffort), 2500);
+    printf("Motor wanted: %d, motor k_icurrent: %d, motor speed: %d\r\n", wantedPosition, currentPosition, speed);
+
 
 
     // give control effort to motor
@@ -115,7 +131,10 @@ int pid(int currentPosition, int newPos) {
     int error = 0;
     int controlEffort = 0;
     error = currentPosition - newPos;
+    integral += error;
+    integral = min(integral, anti_windup);
+    integral = max(integral, -anti_windup);
     
-    controlEffort = (error * k_d);
+    controlEffort = error * k_p + k_i * integral;
     return controlEffort;
 }

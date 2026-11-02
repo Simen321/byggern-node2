@@ -54,13 +54,13 @@ int main()
     encoder_init();
     diode_init();
     solenoid_init();
-    //motor_init();
-    //motor_set_position(300);
-    //motor_set_speed(1000);
+    motor_init();
+    motor_set_position(10);
+    
     while (1)
     {
-        printf("Encoder count = %d\r\n", encoder_read());
-        printf("Diode readback: %d\r\n", diode_read());
+        //printf("Encoder count = %d\r\n", encoder_read());
+        //printf("Diode readback: %d\r\n", diode_read());
 
         if (can_rx(&msg))
         {
@@ -69,15 +69,26 @@ int main()
             uint8_t btn = msg.byte[2];
             //servo_set_pulse_width(1500u);
 
-            servo_set_pulse_width((uint16_t)x*12);
+            //servo_set_pulse_width((uint16_t)x*12);
+
+            
+            if (x > 140) {
+            motor_increase_position(0.5*(abs(x-128)));
+
+            }
+            if (x < 115) {
+                motor_decrease_position(0.5*(abs(x-128)));
+            }
+
+
             if (btn == 1) {
                 solenoid_toggle();
             } 
 
-            can_printmsg(msg);
+            //can_printmsg(msg);
             can_tx(msg);
         }
-        //motor_run_position();
+        motor_run_position();
         /* code */
     }
     
