@@ -23,6 +23,8 @@
 #include "encoder.h"
 #include "diode.h"
 #include "motor.h"
+#include "solednoid.h"
+
 
 
 int main()
@@ -43,7 +45,7 @@ int main()
 
     CanMsg msg;
 
-    printf("Hello World\n\r");
+    printf("Hello nn\n\r");
 
     // Servo init
     servo_init();
@@ -51,9 +53,10 @@ int main()
     servo_enable();
     encoder_init();
     diode_init();
-    motor_init();
-    motor_set_position(300);
-    motor_set_speed(1000);
+    solenoid_init();
+    //motor_init();
+    //motor_set_position(300);
+    //motor_set_speed(1000);
     while (1)
     {
         printf("Encoder count = %d\r\n", encoder_read());
@@ -64,15 +67,17 @@ int main()
             uint8_t x = msg.byte[0];
             uint8_t y = msg.byte[1];
             uint8_t btn = msg.byte[2];
+            //servo_set_pulse_width(1500u);
+
             servo_set_pulse_width((uint16_t)x*12);
             if (btn == 1) {
-                servo_toggle();
+                solenoid_toggle();
             } 
 
             can_printmsg(msg);
             can_tx(msg);
         }
-        motor_run_position();
+        //motor_run_position();
         /* code */
     }
     
