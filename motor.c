@@ -1,29 +1,44 @@
 #include "motor.h"
 #include <sam.h>
+#include <stdlib.h>
+#include <math.h>
 
 
-#define k_p 3
-#define k_i 0.1
-#define k_d 0
-#define anti_windup 20000
+// controller gains. error is in encoder ticks, output is in PWM duty counts (CPRD = 4200)
+#define k_p 2.0f        // duty per tick of error
+#define k_i 1.0f        // duty per tick*second of error
+#define k_d 0.05f       // duty per tick/second of velocity
 
-int integral = 0;
+#define i_term_limit 800.0f     // anti-windup: the I term alone can never give more than this
+
+#define control_hz 100
+#define dt (1.0f / control_hz)
+
+// friction compensation. the motor does not move below about 700, so that is our new zero.
+// measure these in each direction and set them just below where it starts moving.
+#define min_speed_dir0 700
+#define min_speed_dir1 700
+#define max_speed 2500
+
+#define position_tolerance 10   // ticks. inside this we stop and clear the integral
+#define max_ramp_step 30        // ticks per control tick the reference may move (3000 ticks/s)
 
 #define maxPosition 2200
 #define minPosition 0
 
 
-int previousWanted = 0;
-
-int wantedPosition = 0;
+volatile int wantedPosition = 0;    // set from main loop (joystick)
+volatile int referencePosition = 0; // ramps toward wantedPosition inside the controller
 uint8_t previousDirection = 1;
-int deadband_threshold = 20;
 
+float iTerm = 0;
+int previousPosition = 0;
 
-typedef enum {
-    POSITION,
-    VELOCITY
-} Controltype;
+// debug values, written in the interrupt and printed from the main loop
+volatile uint32_t controlTicks = 0;
+volatile int debugPosition = 0;
+volatile int debugEffort = 0;
+volatile int debugSpeed = 0;
 
 
 
@@ -47,10 +62,23 @@ void motor_init(void) {
 
     PWM->PWM_ENA = (1u << 0);
 
+    previousPosition = encoder_read();
+    referencePosition = previousPosition;
 
+    // TC0 channel 0 gives the fixed control rate. MCK/128 = 656250 Hz, interrupt on RC compare
+    PMC->PMC_PCER0 = (1u << ID_TC0);
+    TC0->TC_CHANNEL[0].TC_CMR = TC_CMR_TCCLKS_TIMER_CLOCK4 | TC_CMR_WAVE | TC_CMR_WAVSEL_UP_RC;
+    TC0->TC_CHANNEL[0].TC_RC = (84000000u / 128u) / control_hz;
+    TC0->TC_CHANNEL[0].TC_IER = TC_IER_CPCS;
+    NVIC_EnableIRQ(TC0_IRQn);
+    TC0->TC_CHANNEL[0].TC_CCR = TC_CCR_CLKEN | TC_CCR_SWTRG;
 }
 
 
+void TC0_Handler(void) {
+    TC0->TC_CHANNEL[0].TC_SR; // reading SR clears the interrupt flag
+    motor_run_position();
+}
 
 
 
@@ -73,7 +101,7 @@ void motor_set_direction(uint8_t direction) {
 }
 
 void motor_set_speed(uint16_t speed) {
-    PWM->PWM_CH_NUM[0].PWM_CDTYUPD = speed;
+    PWM->PWM_CH_NUM[0].PWM_CDTYUPD = min(speed, max_speed);
 }
 
 
@@ -82,59 +110,78 @@ void motor_set_speed(uint16_t speed) {
 void motor_set_position(int position) {
     if (((position) < maxPosition) && ((position) > minPosition)) {
         wantedPosition = position;
-        //previousWanted = wantedPosition;
     }
 }
 
 void motor_increase_position(uint8_t increment) {
     if (((wantedPosition+increment) < maxPosition) && ((wantedPosition+increment) > minPosition)) {
         wantedPosition += increment;
-        //previousWanted = wantedPosition;
-
     }
 }
 void motor_decrease_position(uint8_t increment) {
     if (((wantedPosition-increment) < maxPosition) && ((wantedPosition-increment) > minPosition)) {
         wantedPosition -= increment;
-        //previousWanted = wantedPosition;
-
     }
 }
 
-void motor_run_position() {
-    // calculate pid
+
+// runs at control_hz from TC0_Handler. no printf in here, it would block the interrupt
+void motor_run_position(void) {
     int currentPosition = encoder_read();
-    int controlEffort = pid(currentPosition, wantedPosition);
-    //if (previousWanted != wantedPosition) {
-    //    integral = 0;
-    //}
-    if (abs(controlEffort) < deadband_threshold) {
-        motor_set_speed(0); 
+    controlTicks++;
+
+    // move the reference toward the wanted position at a limited rate
+    int step = wantedPosition - referencePosition;
+    step = min(step, max_ramp_step);
+    step = max(step, -max_ramp_step);
+    referencePosition += step;
+
+    int error = currentPosition - referencePosition;
+
+    // derivative on measurement, so setpoint changes do not kick the D term
+    float velocity = (currentPosition - previousPosition) / dt;
+    previousPosition = currentPosition;
+
+    debugPosition = currentPosition;
+
+    // close enough: stop and clear the integral so it does not wind up while standing still
+    if (abs(error) < position_tolerance) {
+        iTerm = 0;
+        debugEffort = 0;
+        debugSpeed = 0;
+        motor_set_speed(0);
         return;
     }
-    uint8_t direction = controlEffort < 0;
-    
 
-    // handling of mins and maxes
-    uint16_t speed = min(abs(controlEffort), 2500);
-    printf("Motor wanted: %d, motor k_icurrent: %d, motor speed: %d\r\n", wantedPosition, currentPosition, speed);
+    float effort = k_p * error + iTerm + k_d * velocity;
+    uint8_t direction = effort < 0;
 
+    // friction compensation: start counting from where the motor actually moves
+    int minSpeed = direction ? min_speed_dir1 : min_speed_dir0;
+    int speed = minSpeed + (int)fabsf(effort);
 
+    // conditional integration: only integrate when the output is not saturated
+    if (speed < max_speed) {
+        iTerm += k_i * error * dt;
+        iTerm = min(iTerm, i_term_limit);
+        iTerm = max(iTerm, -i_term_limit);
+    }
+    speed = min(speed, max_speed);
 
-    // give control effort to motor
+    debugEffort = (int)effort;
+    debugSpeed = speed;
+
     motor_set_direction(direction);
     motor_set_speed(speed);
 }
 
 
-int pid(int currentPosition, int newPos) {
-    int error = 0;
-    int controlEffort = 0;
-    error = currentPosition - newPos;
-    integral += error;
-    integral = min(integral, anti_windup);
-    integral = max(integral, -anti_windup);
-    
-    controlEffort = error * k_p + k_i * integral;
-    return controlEffort;
+// call from the main loop. prints twice a second so the uart does not slow anything down
+void motor_print_status(void) {
+    static uint32_t lastPrint = 0;
+    if (controlTicks - lastPrint >= control_hz / 2) {
+        lastPrint = controlTicks;
+        printf("wanted: %d, ref: %d, pos: %d, effort: %d, speed: %d\r\n",
+               wantedPosition, referencePosition, debugPosition, debugEffort, debugSpeed);
+    }
 }

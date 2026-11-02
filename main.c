@@ -88,7 +88,8 @@ int main()
             //can_printmsg(msg);
             can_tx(msg);
         }
-        motor_run_position();
+        // motor_run_position() now runs from the TC0 interrupt at a fixed rate
+        motor_print_status();
         /* code */
     }
     
