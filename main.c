@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include "sam.h"
 
 
@@ -26,9 +27,62 @@
 #include "solednoid.h"
 
 
-uint8_t score = 0;
+#include "can_ids.h"
 
-int diode_lwo_point = 0;
+
+// ---- ir beam / game ----
+#define diode_threshold 1500        // below this the beam is blocked
+#define beam_block_ticks 6          // beam must be blocked this long (6 * 5 ms = 30 ms) to count, filters noise
+
+uint8_t gameRunning = 0;            // set by CAN_ID_GAME_START from node 1
+uint8_t beamBlocked = 0;
+uint32_t beamBlockedSince = 0;
+
+
+// ---- console log to node 1 ----
+// text is queued here and sent as CAN_ID_LOG frames, one frame per log_frame_ticks.
+// node 1 only has two receive buffers and checks them once per screen update, so
+// sending many frames back to back would overflow it.
+#define log_frame_ticks 5           // 5 * 5 ms = 25 ms between frames
+#define LOG_QUEUE_SIZE 256          // must be a power of two
+static char logQueue[LOG_QUEUE_SIZE];
+static uint16_t logHead = 0;
+static uint16_t logTail = 0;
+static uint32_t lastLogFrame = 0;
+
+// queue a line of text for the console on node 1. a '\n' is added at the end
+void log_send(const char *text) {
+    while (1) {
+        char c = *text ? *text++ : '\n';
+        uint16_t next = (logHead + 1) & (LOG_QUEUE_SIZE - 1);
+        if (next == logTail) {
+            return; // queue full, drop the rest
+        }
+        logQueue[logHead] = c;
+        logHead = next;
+        if (c == '\n') {
+            return;
+        }
+    }
+}
+
+// send at most one log frame, call every loop
+void log_task(void) {
+    if (logTail == logHead || motor_get_ticks() - lastLogFrame < log_frame_ticks) {
+        return;
+    }
+    CanMsg m = {.id = CAN_ID_LOG, .length = 0};
+    while (m.length < 8 && logTail != logHead) {
+        char c = logQueue[logTail];
+        logTail = (logTail + 1) & (LOG_QUEUE_SIZE - 1);
+        m.byte[m.length++] = c;
+        if (c == '\n') {
+            break; // one line per frame at most, keeps lines easy to split on node 1
+        }
+    }
+    can_tx(m);
+    lastLogFrame = motor_get_ticks();
+}
 
 
 int main()
@@ -45,7 +99,7 @@ int main()
         |       CAN_BR_PHASE1(3)
         |       CAN_BR_PHASE2(2)
         |       CAN_BR_SJW(0)       
-    }, 0);
+    }, 1); // 1: receive with interrupt into a queue, so no frames are lost
 
     CanMsg msg;
 
@@ -62,80 +116,93 @@ int main()
     motor_set_position(10);
     uint8_t previousButton = 0;
 
+    log_send("node 2 started");
+
     while (1)
     {
         //printf("Encoder count = %d\r\n", encoder_read());
         //printf("Diode readback: %d\r\n", diode_read());
 
-        if (can_rx(&msg))
+        // handle every frame that has arrived since last loop
+        while (can_rx(&msg))
         {
             switch (msg.id)
             {
-            case 0x101: // joystick
-
-            //printf("got joystick\r\n");
+            case CAN_ID_JOYSTICK:
+            {
                 uint8_t x = msg.byte[0];
                 uint8_t y = msg.byte[1];
                 uint8_t btn = msg.byte[2];
-                //servo_set_pulse_width(1500u);
-                //servo_set_pulse_width((uint16_t)x*12);
 
                 if (x > 140) {
-                motor_increase_position(1.5*(abs(x-128)));
+                    motor_increase_position(1.5*(abs(x-128)));
                 }
                 if (x < 115) {
                     motor_decrease_position(1.5*(abs(x-128)));
                 }
-                if (btn != previousButton) {
+                // fire only when the button goes down, not again when it is released
+                if (btn && !previousButton) {
                     solenoid_toggle();
-                    previousButton = btn;
-                } 
+                }
+                previousButton = btn;
                 break;
-            case 0x102:
-            //printf("got slider\r\n");
-
+            }
+            case CAN_ID_SLIDER:
+            {
                 uint8_t slider_x = msg.byte[0];
                 uint8_t touchpad_x = msg.byte[1];
                 uint8_t touchpad_y = msg.byte[2];
-                
-                motor_set_position((int)(2200/245)*slider_x);
-                servo_set_pulse_width(1200/255 * touchpad_x + 900 );
-                //printf("slider: %d", slider_x);
-                break;
 
-            case 0x103:
-            //printf("got buton\r\n");
-                uint8_t btn_r2 = msg.byte[0];
-                break;
-            
-            case 0x100:
-            //printf("got solenoid\r\n");
-
-                solenoid_toggle();
-
-            default:
-
+                // multiply before dividing, otherwise 2200/255 becomes 8 and max is 8*255 = 2040
+                motor_set_position((int)slider_x * 2200 / 255);
+                servo_set_pulse_width((int)touchpad_x * 1200 / 255 + 900);
                 break;
             }
+            case CAN_ID_BUTTONS:
+            {
+                uint8_t btn_r2 = msg.byte[0];
+                break;
+            }
+            case CAN_ID_SOLENOID:
+                solenoid_toggle();
+                break;
 
+            case CAN_ID_GAME_START:
+                gameRunning = 1;
+                beamBlocked = 0;
+                log_send("game started");
+                break;
 
-            //can_printmsg(msg);
-            //can_tx(msg);
+            case CAN_ID_GAME_STOP:
+                gameRunning = 0;
+                log_send("game stopped");
+                break;
 
+            default:
+                break;
+            }
         }
 
-        //printf("diode %d\r\n", diode_read());
-        if ((diode_read() < 1500) && diode_lwo_point == 0) {
-            score++;
-            diode_lwo_point = 1;
-        } else if ((diode_read() > 1500) && diode_lwo_point == 1) {
-            diode_lwo_point = 0;
-        } 
-        //printf("score: %d\r\n", score);
+        // ball lost: the beam has been blocked for beam_block_ticks during a game
+        uint32_t now = motor_get_ticks();
+        if (diode_read() < diode_threshold) {
+            if (!beamBlocked) {
+                beamBlocked = 1;
+                beamBlockedSince = now;
+            }
+        } else {
+            beamBlocked = 0;
+        }
+        if (gameRunning && beamBlocked && (now - beamBlockedSince >= beam_block_ticks)) {
+            gameRunning = 0;
+            can_tx((CanMsg){.id = CAN_ID_GAME_OVER, .length = 0});
+            log_send("ball lost");
+        }
+
+        log_task();
 
         // motor_run_position() now runs from the TC0 interrupt at a fixed rate
         motor_print_status();
-        /* code */
     }
     
 }

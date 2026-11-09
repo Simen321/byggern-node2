@@ -11,7 +11,7 @@
 
 #define i_term_limit 800.0f     // anti-windup: the I term alone can never give more than this
 
-#define control_hz 200
+#define control_hz motor_tick_hz // 200, set in motor.h
 #define dt (1.0f / control_hz)
 
 // friction compensation. the motor does not move below about 700, so that is our new zero.
@@ -44,32 +44,42 @@ volatile int debugSpeed = 0;
 
 void motor_init(void) {
 
-    PMC->PMC_PCER1 = (1u << (ID_PWM - 32));
+    // arduino 20, but in sam: PB12.
+    
+    // enable pmc clock on pwm peripheral
+    PMC->PMC_PCER1 = (1u << (ID_PWM - 32)); // -32 since PCER1 controls 32-63, becomes 4.
 
-    PIOB->PIO_ABSR |= (1u << 12);
-    PIOB->PIO_PDR   = (1u << 12);
+    PIOB->PIO_ABSR |= (1u << 12); // set PB12 to peripherial type B.
+    PIOB->PIO_PDR   = (1u << 12); // disable GPIO on pin.
 
-    PIOC->PIO_PER   = (1u << 23);
-    PIOC->PIO_CODR = (1u << 23);
-    PIOC->PIO_OER = (1u << 23);
+    // direction pin: on arduino 7, but in sam: PC23
+    PIOC->PIO_PER   = (1u << 23); // set to gpio 
+    PIOC->PIO_CODR = (1u << 23); // low
+    PIOC->PIO_OER = (1u << 23); // set it to be output
 
-    PWM->PWM_DIS = (1u << 0);
+    PWM->PWM_DIS = (1u << 0); //OFF
 
-    PWM->PWM_CH_NUM[0].PWM_CMR = (1u << 9);
+    PWM->PWM_CH_NUM[0].PWM_CMR = (1u << 9); // 84Mhz, CPOL=1 so higher pwm is higher motor speed
 
-    PWM->PWM_CH_NUM[0].PWM_CPRD = 4200u;
+    // 20khz = 84mgz/x, 4200
+    PWM->PWM_CH_NUM[0].PWM_CPRD = 4200u;  
     PWM->PWM_CH_NUM[0].PWM_CDTY = 0;
 
-    PWM->PWM_ENA = (1u << 0);
+    PWM->PWM_ENA = (1u << 0); // ENABLE
 
     previousPosition = encoder_read();
     referencePosition = previousPosition;
 
+    // TC0 because TC2 is used in encoder. had to add when we found that delta time varied
+    // without a hardware timer on it
     // TC0 channel 0 gives the fixed control rate. MCK/128 = 656250 Hz, interrupt on RC compare
-    PMC->PMC_PCER0 = (1u << ID_TC0);
-    TC0->TC_CHANNEL[0].TC_CMR = TC_CMR_TCCLKS_TIMER_CLOCK4 | TC_CMR_WAVE | TC_CMR_WAVSEL_UP_RC;
+
+
+    PMC->PMC_PCER0 = (1u << ID_TC0); // turn the TC0 timer on
+    TC0->TC_CHANNEL[0].TC_CMR = TC_CMR_TCCLKS_TIMER_CLOCK4 | TC_CMR_WAVE | TC_CMR_WAVSEL_UP_RC; // set
     TC0->TC_CHANNEL[0].TC_RC = (84000000u / 128u) / control_hz;
-    TC0->TC_CHANNEL[0].TC_IER = TC_IER_CPCS;
+    TC0->TC_CHANNEL[0].TC_IER = TC_IER_CPCS; // interupt
+    NVIC_SetPriority(TC0_IRQn, 2); // lower priority than CAN (0), so CAN frames are not lost while this runs
     NVIC_EnableIRQ(TC0_IRQn);
     TC0->TC_CHANNEL[0].TC_CCR = TC_CCR_CLKEN | TC_CCR_SWTRG;
 }
@@ -107,21 +117,18 @@ void motor_set_speed(uint16_t speed) {
 
 
 // 0 is towards the cable side of the box.
+// clamps to the allowed range instead of ignoring values outside it, so the ends can be reached
 void motor_set_position(int position) {
-    if (((position) < maxPosition) && ((position) > minPosition)) {
-        wantedPosition = position;
-    }
+    position = min(position, maxPosition);
+    position = max(position, minPosition);
+    wantedPosition = position;
 }
 
 void motor_increase_position(uint8_t increment) {
-    if (((wantedPosition+increment) < maxPosition) && ((wantedPosition+increment) > minPosition)) {
-        wantedPosition += increment;
-    }
+    motor_set_position(wantedPosition + increment);
 }
 void motor_decrease_position(uint8_t increment) {
-    if (((wantedPosition-increment) < maxPosition) && ((wantedPosition-increment) > minPosition)) {
-        wantedPosition -= increment;
-    }
+    motor_set_position(wantedPosition - increment);
 }
 
 
@@ -176,7 +183,12 @@ void motor_run_position(void) {
 }
 
 
-// call from the main loop. prints twice a second so the uart does not slow anything down
+// number of control ticks since start (control_hz per second). used as a clock by main
+uint32_t motor_get_ticks(void) {
+    return controlTicks;
+}
+
+
 void motor_print_status(void) {
     static uint32_t lastPrint = 0;
     if (controlTicks - lastPrint >= control_hz / 2) {

@@ -60,8 +60,10 @@ void can_init(CanInit init, uint8_t rxInterrupt){
     if(rxInterrupt){
         // Enable interrupt on receive
         CAN0->CAN_IER |= (1 << rxMailbox); 
-        // Enable interrupt in NVIC 
-        NVIC_EnableIRQ(ID_CAN0);
+        // Enable interrupt in NVIC. highest priority so it can interrupt the motor
+        // controller (TC0) and empty the mailbox before the next frame arrives
+        NVIC_SetPriority(CAN0_IRQn, 0);
+        NVIC_EnableIRQ(CAN0_IRQn);
     }
 
     // Enable CAN
@@ -69,8 +71,19 @@ void can_init(CanInit init, uint8_t rxInterrupt){
 }
 
 
-void can_tx(CanMsg m){
-    while(!(CAN0->CAN_MB[txMailbox].CAN_MSR & CAN_MSR_MRDY)){}
+// how long can_tx waits for the previous frame before giving up (busy-wait iterations, roughly 1 ms)
+#define TX_TIMEOUT 20000
+
+uint8_t can_tx(CanMsg m){
+    // wait for the previous frame to be sent. if nobody acks it (node 1 off or unplugged)
+    // the controller retries forever, so give up instead of freezing the whole program.
+    uint32_t timeout = TX_TIMEOUT;
+    while(!(CAN0->CAN_MB[txMailbox].CAN_MSR & CAN_MSR_MRDY)){
+        if (--timeout == 0) {
+            CAN0->CAN_MB[txMailbox].CAN_MCR = CAN_MCR_MACR; // abort the stuck frame
+            return 0;
+        }
+    }
     
     // Set message ID and use CAN 2.0B protocol
     CAN0->CAN_MB[txMailbox].CAN_MID = CAN_MID_MIDvA(m.id) ;
@@ -84,51 +97,49 @@ void can_tx(CanMsg m){
         
     // Set message length and mailbox ready to send
     CAN0->CAN_MB[txMailbox].CAN_MCR = (m.length << CAN_MCR_MDLC_Pos) | CAN_MCR_MTCR;
-}
-
-uint8_t can_rx(CanMsg* m){
-    if(!(CAN0->CAN_MB[rxMailbox].CAN_MSR & CAN_MSR_MRDY)){
-        return 0;
-    }
-
-    // Get message ID
-    m->id = (uint16_t)((CAN0->CAN_MB[rxMailbox].CAN_MID & CAN_MID_MIDvA_Msk) >> CAN_MID_MIDvA_Pos);
-        
-    // Get data length
-    m->length = (uint8_t)((CAN0->CAN_MB[rxMailbox].CAN_MSR & CAN_MSR_MDLC_Msk) >> CAN_MSR_MDLC_Pos);
-    
-    // Get data from CAN mailbox
-    m->dword[0] = CAN0->CAN_MB[rxMailbox].CAN_MDL;
-    m->dword[1] = CAN0->CAN_MB[rxMailbox].CAN_MDH;
-                
-    // Reset for new receive
-    CAN0->CAN_MB[rxMailbox].CAN_MMR = CAN_MMR_MOT_MB_RX;
-    CAN0->CAN_MB[rxMailbox].CAN_MCR |= CAN_MCR_MTCR;
     return 1;
 }
-    
-    
 
-    
-/*
-// Example CAN interrupt handler
+// received frames are copied out of the mailbox by the interrupt and queued here.
+// the mailbox only holds one frame, so without this any frame that arrives while the
+// main loop is busy (solenoid pulse, printf) would be lost.
+#define RX_QUEUE_SIZE 32 // must be a power of two
+static volatile CanMsg rxQueue[RX_QUEUE_SIZE];
+static volatile uint8_t rxHead = 0; // written by the interrupt
+static volatile uint8_t rxTail = 0; // written by can_rx
+
 void CAN0_Handler(void){
-    char can_sr = CAN0->CAN_SR; 
-    
-    // RX interrupt
-    if(can_sr & (1 << rxMailbox)){
-        // Add your message-handling code here
-        can_printmsg(can_rx());
-    } else {
-        printf("CAN0 message arrived in non-used mailbox\n\r");
-    }
-    
-    if(can_sr & CAN_SR_MB0){
-        // Disable interrupt
-        CAN0->CAN_IDR = CAN_IER_MB0;
-    }
-    
-    NVIC_ClearPendingIRQ(ID_CAN0);
-} 
-*/
+    if(CAN0->CAN_MB[rxMailbox].CAN_MSR & CAN_MSR_MRDY){
+        CanMsg m;
+        m.id = (uint16_t)((CAN0->CAN_MB[rxMailbox].CAN_MID & CAN_MID_MIDvA_Msk) >> CAN_MID_MIDvA_Pos);
+        m.length = (uint8_t)((CAN0->CAN_MB[rxMailbox].CAN_MSR & CAN_MSR_MDLC_Msk) >> CAN_MSR_MDLC_Pos);
+        m.dword[0] = CAN0->CAN_MB[rxMailbox].CAN_MDL;
+        m.dword[1] = CAN0->CAN_MB[rxMailbox].CAN_MDH;
 
+        // re-arm the mailbox for the next frame, this also clears the interrupt
+        CAN0->CAN_MB[rxMailbox].CAN_MCR = CAN_MCR_MTCR;
+
+        uint8_t next = (rxHead + 1) & (RX_QUEUE_SIZE - 1);
+        if(next != rxTail){ // drop the frame if the queue is full
+            rxQueue[rxHead].id = m.id;
+            rxQueue[rxHead].length = m.length;
+            rxQueue[rxHead].dword[0] = m.dword[0];
+            rxQueue[rxHead].dword[1] = m.dword[1];
+            rxHead = next;
+        }
+    }
+    NVIC_ClearPendingIRQ(CAN0_IRQn);
+}
+
+// Receive a CAN message from the queue. Does not block.
+uint8_t can_rx(CanMsg* m){
+    if(rxTail == rxHead){
+        return 0;
+    }
+    m->id = rxQueue[rxTail].id;
+    m->length = rxQueue[rxTail].length;
+    m->dword[0] = rxQueue[rxTail].dword[0];
+    m->dword[1] = rxQueue[rxTail].dword[1];
+    rxTail = (rxTail + 1) & (RX_QUEUE_SIZE - 1);
+    return 1;
+}
