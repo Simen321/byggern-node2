@@ -26,6 +26,10 @@
 #include "solednoid.h"
 
 
+uint8_t score = 0;
+
+int diode_lwo_point = 0;
+
 
 int main()
 {
@@ -68,7 +72,8 @@ int main()
             switch (msg.id)
             {
             case 0x101: // joystick
-            printf("got joystick\r\n");
+
+            //printf("got joystick\r\n");
                 uint8_t x = msg.byte[0];
                 uint8_t y = msg.byte[1];
                 uint8_t btn = msg.byte[2];
@@ -87,33 +92,47 @@ int main()
                 } 
                 break;
             case 0x102:
-            printf("got slider\r\n");
+            //printf("got slider\r\n");
 
                 uint8_t slider_x = msg.byte[0];
                 uint8_t touchpad_x = msg.byte[1];
                 uint8_t touchpad_y = msg.byte[2];
-
+                
+                motor_set_position((int)(2200/245)*slider_x);
+                servo_set_pulse_width(1200/255 * touchpad_x + 900 );
+                //printf("slider: %d", slider_x);
                 break;
 
             case 0x103:
-            printf("got buton\r\n");
-
+            //printf("got buton\r\n");
                 uint8_t btn_r2 = msg.byte[0];
                 break;
             
             case 0x100:
-            printf("got solenoid\r\n");
+            //printf("got solenoid\r\n");
 
                 solenoid_toggle();
 
             default:
+
                 break;
             }
 
 
             //can_printmsg(msg);
-            can_tx(msg);
+            //can_tx(msg);
+
         }
+
+        //printf("diode %d\r\n", diode_read());
+        if ((diode_read() < 1500) && diode_lwo_point == 0) {
+            score++;
+            diode_lwo_point = 1;
+        } else if ((diode_read() > 1500) && diode_lwo_point == 1) {
+            diode_lwo_point = 0;
+        } 
+        //printf("score: %d\r\n", score);
+
         // motor_run_position() now runs from the TC0 interrupt at a fixed rate
         motor_print_status();
         /* code */

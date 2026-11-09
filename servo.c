@@ -49,7 +49,7 @@ void servo_set_pulse_width(uint16_t pwm) {
     //PWM->PWM_CH_NUM[1].PWM_CDTY = 10000u;
     PWM->PWM_CH_NUM[1].PWM_CDTYUPD= pwm;
 
-    printf("PWM_SR=%lx CCNT1=%lu PSR_B13=%d ABSR_B13=%d\r\n", PWM->PWM_SR, PWM->PWM_CH_NUM[1].PWM_CCNT, !!(PIOB->PIO_PSR & (1u<<13)), !!(PIOB->PIO_ABSR & (1u << 13)));
+    //printf("PWM_SR=%lx CCNT1=%lu PSR_B13=%d ABSR_B13=%d\r\n", PWM->PWM_SR, PWM->PWM_CH_NUM[1].PWM_CCNT, !!(PIOB->PIO_PSR & (1u<<13)), !!(PIOB->PIO_ABSR & (1u << 13)));
 
 
 }

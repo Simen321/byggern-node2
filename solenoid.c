@@ -10,7 +10,7 @@ void solenoid_init(void){
 void solenoid_toggle(void){
     solenoid_on();
     int i = 0;
-    while (i < 25000) {
+    while (i < 840000) {
         i++;
     }
     solenoid_off();

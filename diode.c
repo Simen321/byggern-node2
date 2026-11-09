@@ -10,7 +10,7 @@ uint16_t diode_read(void){
     ADC->ADC_CR = ADC_CR_START;
 
     while (!(ADC->ADC_ISR & ADC_ISR_EOC7));
-
+    
     return ADC->ADC_CDR[7] & 0x0FFF;
 
 }

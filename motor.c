@@ -7,7 +7,7 @@
 // controller gains. error is in encoder ticks, output is in PWM duty counts (CPRD = 4200)
 #define k_p 5.0f        // duty per tick of error
 #define k_i 1.0f        // duty per tick*second of error
-#define k_d 0.00f       // duty per tick/second of velocity
+#define k_d 0.25f       // duty per tick/second of velocity
 
 #define i_term_limit 800.0f     // anti-windup: the I term alone can never give more than this
 
@@ -16,8 +16,8 @@
 
 // friction compensation. the motor does not move below about 700, so that is our new zero.
 // measure these in each direction and set them just below where it starts moving.
-#define min_speed_dir0 700
-#define min_speed_dir1 700
+#define min_speed_dir0 400
+#define min_speed_dir1 400
 #define max_speed 2500
 
 #define position_tolerance 10   // ticks. inside this we stop and clear the integral
