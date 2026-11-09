@@ -31,6 +31,12 @@ void encoder_init(void) {
 }
 
 
+// make the current position 0 (used after homing)
+void encoder_reset(void) {
+    TC2->TC_CHANNEL[0].TC_CCR = TC_CCR_SWTRG; // software trigger resets the counter
+}
+
+
 int16_t encoder_read(void) {
     return (int16_t)TC2->TC_CHANNEL[0].TC_CV;
 }

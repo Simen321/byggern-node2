@@ -24,4 +24,5 @@
 
 void encoder_init(void);
 int16_t encoder_read(void);
+void encoder_reset(void);
 //void encoder_sample(void);

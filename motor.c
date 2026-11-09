@@ -5,9 +5,10 @@
 
 
 // controller gains. error is in encoder ticks, output is in PWM duty counts (CPRD = 4200)
-#define k_p 5.0f        // duty per tick of error
-#define k_i 1.0f        // duty per tick*second of error
-#define k_d 0.25f       // duty per tick/second of velocity
+// these are the start values, the settings menu on node 1 can change them (motor_set_pid)
+volatile float k_p = 5.0f;      // duty per tick of error
+volatile float k_i = 1.0f;      // duty per tick*second of error
+volatile float k_d = 0.25f;     // duty per tick/second of velocity
 
 #define i_term_limit 800.0f     // anti-windup: the I term alone can never give more than this
 
@@ -18,12 +19,18 @@
 // measure these in each direction and set them just below where it starts moving.
 #define min_speed_dir0 400
 #define min_speed_dir1 400
-#define max_speed 2500
+volatile int max_speed = 2500;  // highest PWM duty the controller may use, changed with motor_set_max_speed
+
+// homing at start: drive towards 0 until the motor stops against the end, then call that 0
+#define homing_speed 1000           // PWM duty, has to be above min_speed to move at all
+#define homing_step_loops 120000    // busy-wait loops between encoder checks, roughly 10 ms
+#define homing_still_steps 20       // encoder unchanged for this many checks (~200 ms) means we hit the end
+#define homing_max_steps 600        // give up after ~6 s
 
 #define position_tolerance 10   // ticks. inside this we stop and clear the integral
 #define max_ramp_step 30        // ticks per control tick the reference may move (3000 ticks/s)
 
-#define maxPosition 2200
+#define maxPosition motor_max_position // 2200, set in motor.h
 #define minPosition 0
 
 
@@ -67,6 +74,9 @@ void motor_init(void) {
 
     PWM->PWM_ENA = (1u << 0); // ENABLE
 
+    // the encoder only counts how far we moved since power on, so find the end first
+    motor_home();
+
     previousPosition = encoder_read();
     referencePosition = previousPosition;
 
@@ -82,6 +92,33 @@ void motor_init(void) {
     NVIC_SetPriority(TC0_IRQn, 2); // lower priority than CAN (0), so CAN frames are not lost while this runs
     NVIC_EnableIRQ(TC0_IRQn);
     TC0->TC_CHANNEL[0].TC_CCR = TC_CCR_CLKEN | TC_CCR_SWTRG;
+}
+
+
+// drive slowly towards 0 (the cable side) until the encoder stops changing, which means the
+// motor is against the end. then reset the encoder so that end is position 0.
+// runs before the control interrupt is started, so it uses busy-waiting.
+void motor_home(void) {
+    motor_set_direction(0); // direction 0 moves towards position 0
+    PWM->PWM_CH_NUM[0].PWM_CDTYUPD = homing_speed;
+
+    int lastPosition = encoder_read();
+    int stillSteps = 0;
+    for (int step = 0; step < homing_max_steps && stillSteps < homing_still_steps; step++) {
+        for (volatile int i = 0; i < homing_step_loops; i++) {}
+
+        int position = encoder_read();
+        if (abs(position - lastPosition) <= 1) {
+            stillSteps++;
+        } else {
+            stillSteps = 0;
+        }
+        lastPosition = position;
+    }
+
+    PWM->PWM_CH_NUM[0].PWM_CDTYUPD = 0;
+    for (volatile int i = 0; i < homing_step_loops * 10; i++) {} // let it settle, ~100 ms
+    encoder_reset();
 }
 
 
@@ -180,6 +217,22 @@ void motor_run_position(void) {
 
     motor_set_direction(direction);
     motor_set_speed(speed);
+}
+
+
+// new controller gains from the settings menu. the integral is cleared so the old one does not kick
+void motor_set_pid(float p, float i, float d) {
+    k_p = p;
+    k_i = i;
+    k_d = d;
+    iTerm = 0;
+}
+
+// highest PWM duty the controller may use, between the friction limit and the full period (4200)
+void motor_set_max_speed(int speed) {
+    speed = max(speed, min_speed_dir0 + 100);
+    speed = min(speed, 4200);
+    max_speed = speed;
 }
 
 

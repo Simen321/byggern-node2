@@ -39,6 +39,32 @@ uint8_t beamBlocked = 0;
 uint32_t beamBlockedSince = 0;
 
 
+// ---- control settings from the settings menu on node 1 ----
+uint8_t controlScheme = CONTROL_POSITION;
+int maxSpeedSetting = 0;            // 0 = not received yet, the motor uses its own default
+uint16_t pidSetting[3] = {0, 0, 0}; // p, i, d in hundredths, 0 = not received yet
+
+// the slider and touchpad are only followed after they have been moved, so the motor and servo
+// stay in the middle at start (and when switching scheme) until someone touches them
+#define touch_threshold 3           // change needed before we start following
+#define joystick_divider 4          // velocity control: target moves |x-128|/4 ticks per message (60 per second)
+int sliderStart = -1;               // first value seen, -1 = none yet
+uint8_t sliderFollowing = 0;
+int touchStart = -1;
+uint8_t touchFollowing = 0;
+
+// follow `value` once it has moved more than touch_threshold away from the first value seen
+uint8_t has_been_touched(uint8_t value, int *start, uint8_t *following) {
+    if (*start < 0) {
+        *start = value;
+    }
+    if (abs(value - *start) > touch_threshold) {
+        *following = 1;
+    }
+    return *following;
+}
+
+
 // ---- console log to node 1 ----
 // text is queued here and sent as CAN_ID_LOG frames, one frame per log_frame_ticks.
 // node 1 only has two receive buffers and checks them once per screen update, so
@@ -113,7 +139,7 @@ int main()
     diode_init();
     solenoid_init();
     motor_init();
-    motor_set_position(10);
+    motor_set_position(motor_max_position / 2); // start in the middle
     uint8_t previousButton = 0;
 
     log_send("node 2 started");
@@ -134,11 +160,14 @@ int main()
                 uint8_t y = msg.byte[1];
                 uint8_t btn = msg.byte[2];
 
-                if (x > 140) {
-                    motor_increase_position(1.5*(abs(x-128)));
-                }
-                if (x < 115) {
-                    motor_decrease_position(1.5*(abs(x-128)));
+                // velocity control: the further the joystick is pushed, the faster the target moves
+                if (controlScheme == CONTROL_VELOCITY) {
+                    if (x > 140) {
+                        motor_increase_position(abs(x-128) / joystick_divider);
+                    }
+                    if (x < 115) {
+                        motor_decrease_position(abs(x-128) / joystick_divider);
+                    }
                 }
                 // fire only when the button goes down, not again when it is released
                 if (btn && !previousButton) {
@@ -153,9 +182,15 @@ int main()
                 uint8_t touchpad_x = msg.byte[1];
                 uint8_t touchpad_y = msg.byte[2];
 
+                // position control: the slider sets the position
                 // multiply before dividing, otherwise 2200/255 becomes 8 and max is 8*255 = 2040
-                motor_set_position((int)slider_x * 2200 / 255);
-                servo_set_pulse_width((int)touchpad_x * 1200 / 255 + 900);
+                if (controlScheme == CONTROL_POSITION &&
+                    has_been_touched(slider_x, &sliderStart, &sliderFollowing)) {
+                    motor_set_position((int)slider_x * motor_max_position / 255);
+                }
+                if (has_been_touched(touchpad_x, &touchStart, &touchFollowing)) {
+                    servo_set_pulse_width((int)touchpad_x * 1200 / 255 + 900);
+                }
                 break;
             }
             case CAN_ID_BUTTONS:
@@ -177,6 +212,49 @@ int main()
                 gameRunning = 0;
                 log_send("game stopped");
                 break;
+
+            // node 1 sends the settings when they change and every few seconds,
+            // so only act (and log) when something is different
+            case CAN_ID_SETTINGS_CONTROL:
+            {
+                uint8_t scheme = msg.byte[0];
+                int maxSpeed = (msg.byte[1] << 8) | msg.byte[2];
+                if (scheme != controlScheme || maxSpeed != maxSpeedSetting) {
+                    if (scheme != controlScheme) {
+                        // wait for the slider to be moved again before following it
+                        sliderStart = -1;
+                        sliderFollowing = 0;
+                    }
+                    controlScheme = scheme;
+                    maxSpeedSetting = maxSpeed;
+                    motor_set_max_speed(maxSpeed);
+
+                    char text[24];
+                    snprintf(text, sizeof(text), "%s, max %d",
+                             scheme == CONTROL_VELOCITY ? "velocity" : "position", maxSpeed);
+                    log_send(text);
+                }
+                break;
+            }
+            case CAN_ID_SETTINGS_PID:
+            {
+                uint16_t pid[3];
+                for (int i = 0; i < 3; i++) {
+                    pid[i] = (msg.byte[2 * i] << 8) | msg.byte[2 * i + 1];
+                }
+                if (pid[0] != pidSetting[0] || pid[1] != pidSetting[1] || pid[2] != pidSetting[2]) {
+                    for (int i = 0; i < 3; i++) {
+                        pidSetting[i] = pid[i];
+                    }
+                    motor_set_pid(pid[0] / 100.0f, pid[1] / 100.0f, pid[2] / 100.0f);
+
+                    char text[24];
+                    snprintf(text, sizeof(text), "PID %u.%02u %u.%02u %u.%02u",
+                             pid[0] / 100, pid[0] % 100, pid[1] / 100, pid[1] % 100, pid[2] / 100, pid[2] % 100);
+                    log_send(text);
+                }
+                break;
+            }
 
             default:
                 break;
